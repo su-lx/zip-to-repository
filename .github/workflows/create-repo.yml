@@ -1,1 +1,99 @@
 
+name: ZIP to New GitHub Repository
+
+on:
+  push:
+    paths:
+      - "uploads/*.zip"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  create-repository:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download uploaded ZIP
+        uses: actions/checkout@v4
+
+      - name: Find ZIP
+        id: zip
+        shell: bash
+        run: |
+          ZIP_FILE=$(find uploads -maxdepth 1 -type f -iname "*.zip" | head -n 1)
+
+          if [ -z "$ZIP_FILE" ]; then
+            echo "Nenhum ZIP encontrado."
+            exit 1
+          fi
+
+          echo "file=$ZIP_FILE" >> "$GITHUB_OUTPUT"
+
+          NAME=$(basename "$ZIP_FILE" .zip)
+          NAME=$(echo "$NAME" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g; s/--*/-/g; s/^-//; s/-$//')
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Extract project safely
+        env:
+          ZIP_FILE: ${{ steps.zip.outputs.file }}
+        run: |
+          mkdir extracted
+          python3 - <<'PY'
+          import os
+          import stat
+          import zipfile
+
+          with zipfile.ZipFile(os.environ["ZIP_FILE"]) as z:
+              root = os.path.realpath("extracted")
+
+              for item in z.infolist():
+                  target = os.path.realpath(
+                      os.path.join(root, item.filename)
+                  )
+
+                  if os.path.commonpath([root, target]) != root:
+                      raise ValueError("Caminho inseguro no ZIP")
+
+                  if stat.S_ISLNK(item.external_attr >> 16):
+                      raise ValueError("Links simbólicos não são permitidos")
+
+                  z.extract(item, root)
+          PY
+
+      - name: Remove embedded Git metadata
+        run: |
+          find extracted -type d -name ".git" -prune -exec rm -rf {} +
+
+      - name: Create Git repository
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          REPO_NAME: ${{ steps.zip.outputs.name }}
+        run: |
+          cd extracted
+
+          git init -b main
+          git config user.name "GitHub Actions"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add -A
+
+          if git diff --cached --quiet; then
+            echo "O ZIP não contém arquivos para enviar."
+            exit 1
+          fi
+
+          git commit -m "Initial project upload"
+
+          gh repo create "$REPO_NAME" \
+            --private \
+            --source=. \
+            --remote=origin \
+            --push
+
+      - name: Show created repository
+        run: |
+          echo "Repositório criado com sucesso!"
+          echo "https://github.com/${{ github.repository_owner }}/${{ steps.zip.outputs.name }}"
+
